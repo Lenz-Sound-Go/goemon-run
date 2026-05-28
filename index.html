@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>Goemon Kusarigama Run</title>
+<style>
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#101018;touch-action:none;font-family:monospace}
+canvas{position:fixed;inset:0;width:100vw;height:100vh;image-rendering:pixelated;background:#101018}
+#ui{position:fixed;inset:0;pointer-events:none;user-select:none;-webkit-user-select:none}
+.pad{position:absolute;bottom:18px;width:70px;height:70px;border:3px solid rgba(255,255,255,.65);background:rgba(20,20,30,.35);border-radius:18px;color:white;font:bold 30px monospace;display:flex;align-items:center;justify-content:center;pointer-events:auto;touch-action:none;text-shadow:2px 2px #000}
+.pad:active,.pad.on{background:rgba(255,230,120,.45);transform:scale(.97)}
+#left{left:18px}#right{left:100px}#jump{right:105px;bottom:95px}#pipe{right:24px}#chain{right:105px}
+#hint{position:absolute;left:0;right:0;top:8px;text-align:center;color:rgba(255,255,255,.65);font:12px monospace;text-shadow:1px 1px #000;pointer-events:none}
+@media (orientation:portrait){
+.pad{width:62px;height:62px;font-size:25px;bottom:26px}
+#left{left:12px}#right{left:82px}#jump{right:84px;bottom:100px}#pipe{right:12px}#chain{right:84px}
+#hint{font-size:11px}
+}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="ui">
+  <div id="hint">A/D move · W/↑ jump · J pipe · K chain · Touch buttons</div>
+  <div class="pad" id="left">◀</div>
+  <div class="pad" id="right">▶</div>
+  <div class="pad" id="jump">跳</div>
+  <div class="pad" id="chain">⛓</div>
+  <div class="pad" id="pipe">煙</div>
+</div>
+<script>
+"use strict";
+const canvas=document.getElementById("game"),ctx=canvas.getContext("2d");
+ctx.imageSmoothingEnabled=false;
+let DPR=1,SW=480,SH=270;
+function resize(){DPR=Math.max(1,Math.min(3,devicePixelRatio||1));canvas.width=Math.floor(innerWidth*DPR);canvas.height=Math.floor(innerHeight*DPR);SW=480;SH=270}
+addEventListener("resize",resize,{passive:true});resize();
+
+const G=880,FRIC=.82;
+const keys={left:false,right:false,jump:false,pipe:false,chain:false};
+const down={};
+addEventListener("keydown",e=>{
+ const k=e.key.toLowerCase();down[k]=true;
+ if(k==="a")keys.left=true;if(k==="d")keys.right=true;
+ if(k==="w"||e.key==="ArrowUp")keys.jump=true;
+ if(k==="j")keys.pipe=true;if(k==="k"||k==="l")keys.chain=true;
+ if(k==="r"&&game.state!=="play")restart();
+ if((k===" "||k==="enter")&&game.state!=="play")restart();
+});
+addEventListener("keyup",e=>{
+ const k=e.key.toLowerCase();down[k]=false;
+ if(k==="a")keys.left=false;if(k==="d")keys.right=false;
+ if(k==="w"||e.key==="ArrowUp")keys.jump=false;
+ if(k==="j")keys.pipe=false;if(k==="k"||k==="l")keys.chain=false;
+});
+["left","right","jump","pipe","chain"].forEach(id=>{
+ const el=document.getElementById(id);
+ const set=v=>{keys[id]=v;el.classList.toggle("on",v)};
+ el.addEventListener("touchstart",e=>{e.preventDefault();set(true)},{passive:false});
+ el.addEventListener("touchend",e=>{e.preventDefault();set(false)},{passive:false});
+ el.addEventListener("touchcancel",e=>{e.preventDefault();set(false)},{passive:false});
+ el.addEventListener("mousedown",e=>{e.preventDefault();set(true)});
+ addEventListener("mouseup",()=>set(false));
+});
+addEventListener("contextmenu",e=>e.preventDefault());
+
+function clamp(v,a,b){return Math.max(a,Math.min(b,v))}
+function rnd(a,b){return a+Math.random()*(b-a)}
+function rects(a,b){return a.x<b.x+b.w&&a.x+a.w>b.x&&a.y<b.y+b.h&&a.y+a.h>b.y}
+function ir(x){return Math.floor(x)}
+function hitbox(o){return{x:o.x,y:o.y,w:o.w,h:o.h}}
+
+const levelDefs=[
+ {name:"Edo Village",theme:0,len:2250,spawn:[70,170],
+  plats:[[0,230,2250,50],[260,188,110,12],[470,166,95,12],[690,198,145,12],[910,170,90,12],[1130,196,125,12],[1390,158,115,12],[1630,194,130,12],[1850,166,105,12]],
+  enemies:[["ninja",330],["ninja",550],["samurai",770],["ninja",1030],["samurai",1280],["ninja",1510],["samurai",1770],["ninja",1980]]},
+ {name:"Bamboo Shrine",theme:1,len:2450,spawn:[60,170],
+  plats:[[0,230,2450,50],[230,186,100,12],[430,154,130,12],[710,192,110,12],[930,162,115,12],[1160,198,150,12],[1450,172,120,12],[1660,142,110,12],[1880,190,145,12],[2130,160,100,12]],
+  enemies:[["ninja",290],["oni",540],["ninja",780],["samurai",1010],["oni",1260],["ninja",1530],["samurai",1760],["oni",2040],["ninja",2250]]},
+ {name:"Demon Castle",theme:2,len:1900,spawn:[60,170],
+  plats:[[0,230,1900,50],[230,190,110,12],[455,158,105,12],[660,190,115,12],[880,160,110,12],[1080,198,130,12],[1260,176,130,12],[1460,206,120,12]],
+  enemies:[["samurai",300],["ninja",520],["oni",760],["samurai",990],["ninja",1180],["boss",1510]]}
+];
+
+let game,player,level,enemies,particles,projectiles,attacks,cameraX,shake,shakeT,lastTime;
+
+function restart(){
+ game={state:"play",level:0,score:0,lives:3,combo:0,msg:""};
+ particles=[];projectiles=[];attacks=[];shake=0;shakeT=0;loadLevel(0);
+}
+function loadLevel(i){
+ level=JSON.parse(JSON.stringify(levelDefs[i]));
+ enemies=level.enemies.map(e=>makeEnemy(e[0],e[1],100));
+ player={x:level.spawn[0],y:level.spawn[1],w:16,h:25,vx:0,vy:0,dir:1,onGround:false,hp:100,maxhp:100,inv:0,pipeCd:0,chainCd:0,jumpLock:false,dead:false};
+ cameraX=0;projectiles=[];attacks=[];particles=[];
+ game.msg=level.name;
+}
+function makeEnemy(type,x,y){
+ const stats={
+  ninja:{w:15,h:22,hp:35,spd:55,dmg:9,score:120,color:"#252334",accent:"#7bd0ff"},
+  samurai:{w:17,h:24,hp:55,spd:35,dmg:13,score:180,color:"#5b2d2c",accent:"#ffd36b"},
+  oni:{w:23,h:29,hp:85,spd:28,dmg:18,score:260,color:"#8b2bb0",accent:"#ff5b55"},
+  boss:{w:38,h:48,hp:360,spd:22,dmg:22,score:1200,color:"#3b203d",accent:"#ff4040"}
+ }[type];
+ return {type,x,y,w:stats.w,h:stats.h,vx:0,vy:0,hp:stats.hp,maxhp:stats.hp,spd:stats.spd,dmg:stats.dmg,score:stats.score,color:stats.color,accent:stats.accent,dir:-1,onGround:false,atk:0,shoot:1.5,dead:false,boss:type==="boss"};
+}
+restart();
+
+function platforms(){return level.plats.map(p=>({x:p[0],y:p[1],w:p[2],h:p[3]}))}
+function collideMove(o,dt){
+ o.x+=o.vx*dt;
+ for(const p of platforms())if(rects(o,p)){
+  if(o.vx>0)o.x=p.x-o.w; else if(o.vx<0)o.x=p.x+p.w;
+  o.vx=0;
+ }
+ o.y+=o.vy*dt;o.onGround=false;
+ for(const p of platforms())if(rects(o,p)){
+  if(o.vy>0){o.y=p.y-o.h;o.vy=0;o.onGround=true}
+  else if(o.vy<0){o.y=p.y+p.h;o.vy=0}
+ }
+ if(o.y>360){o.hp=0}
+}
+function hurtPlayer(dmg,dir){
+ if(player.inv>0||game.state!=="play")return;
+ player.hp-=dmg;player.inv=1.05;player.vx=dir*150;player.vy=-160;shake=5;shakeT=.18;
+ burst(player.x+player.w/2,player.y+12,"#ff4b4b",12);
+ if(player.hp<=0){
+  game.lives--;shake=9;shakeT=.35;
+  if(game.lives<0){game.state="over";game.msg="Game Over"}
+  else{player.x=level.spawn[0];player.y=level.spawn[1];player.vx=player.vy=0;player.hp=player.maxhp;player.inv=2}
+ }
+}
+function damageEnemy(e,dmg,kx,ky){
+ if(e.dead)return;
+ e.hp-=dmg;e.vx+=kx;e.vy+=ky;shake=Math.max(shake,e.boss?5:3);shakeT=.12;
+ burst(e.x+e.w/2,e.y+e.h/2,e.accent,10);
+ if(e.hp<=0){
+  e.dead=true;game.score+=e.score;game.combo++;
+  burst(e.x+e.w/2,e.y+e.h/2,"#ffe6a3",24);
+  for(let i=0;i<6;i++)particles.push({x:e.x+e.w/2,y:e.y+e.h/2,vx:rnd(-90,90),vy:rnd(-130,-40),life:rnd(.4,.9),c:"#f6d365",s:2});
+ }
+}
+function burst(x,y,c,n){for(let i=0;i<n;i++)particles.push({x,y,vx:rnd(-120,120),vy:rnd(-160,70),life:rnd(.25,.65),c,s:rnd(1,3)})}
+
+let pipeLatch=false,chainLatch=false;
+function update(dt){
+ if(game.state!=="play")return;
+ player.inv=Math.max(0,player.inv-dt);player.pipeCd=Math.max(0,player.pipeCd-dt);player.chainCd=Math.max(0,player.chainCd-dt);
+ const ax=(keys.right?1:0)-(keys.left?1:0);
+ if(ax){player.vx+=ax*620*dt;player.dir=ax;player.vx=clamp(player.vx,-125,125)}else player.vx*=Math.pow(FRIC,dt*60);
+ if(keys.jump&&!player.jumpLock&&player.onGround){player.vy=-320;player.jumpLock=true;burst(player.x+8,player.y+25,"#d0c0a0",5)}
+ if(!keys.jump)player.jumpLock=false;
+ if(keys.pipe&&!pipeLatch&&player.pipeCd<=0){pipeAttack();pipeLatch=true}
+ if(!keys.pipe)pipeLatch=false;
+ if(keys.chain&&!chainLatch&&player.chainCd<=0){chainAttack();chainLatch=true}
+ if(!keys.chain)chainLatch=false;
+ player.vy+=G*dt;collideMove(player,dt);
+ cameraX=clamp(player.x-SW*.42,0,level.len-SW);
+ updateEnemies(dt);updateAttacks(dt);updateProjectiles(dt);updateParticles(dt);
+ if(shakeT>0){shakeT-=dt;if(shakeT<=0)shake=0}
+ const boss=enemies.find(e=>e.boss&&!e.dead);
+ if(player.x>level.len-70&&(!boss||boss.dead)){
+  if(game.level<2){game.level++;game.score+=500;loadLevel(game.level)}
+  else{game.state="win";game.msg="Victory! Goemon restores peace to Edo"}
+ }
+}
+function pipeAttack(){
+ player.pipeCd=.25;
+ const box={x:player.dir>0?player.x+player.w:player.x-26,y:player.y+5,w:26,h:17,life:.11,type:"pipe",dir:player.dir};
+ attacks.push(box);burst(player.x+player.w/2+player.dir*14,player.y+10,"#b8e6ff",5);
+}
+function chainAttack(){
+ player.chainCd=.55;
+ const len=92;
+ const atk={x:player.x+player.w/2,y:player.y+9,ex:player.x+player.w/2+player.dir*len,ey:player.y+3,life:.22,type:"chain",dir:player.dir,hit:new Set()};
+ attacks.push(atk);burst(atk.ex,atk.ey,"#d9d9e8",8);
+}
+function updateAttacks(dt){
+ for(let i=attacks.length-1;i>=0;i--){
+  const a=attacks[i];a.life-=dt;
+  if(a.life<=0){attacks.splice(i,1);continue}
+  for(const e of enemies){
+   if(e.dead)continue;
+   if(a.type==="pipe"){
+    if(rects(a,e)){damageEnemy(e,18,a.dir*95,-65)}
+   }else{
+    if(a.hit.has(e))continue;
+    const minx=Math.min(a.x,a.ex)-4,maxx=Math.max(a.x,a.ex)+4;
+    const close=e.x+e.w>minx&&e.x<maxx&&e.y<a.y+28&&e.y+e.h>a.y-20&&((a.dir>0&&e.x>a.x)||(a.dir<0&&e.x<a.x));
+    if(close){a.hit.add(e);damageEnemy(e,28,a.dir*150,-90)}
+   }
+  }
+ }
+}
+function updateEnemies(dt){
+ for(const e of enemies){
+  if(e.dead)continue;
+  e.atk=Math.max(0,e.atk-dt);e.shoot-=dt;
+  const dx=(player.x+player.w/2)-(e.x+e.w/2),dist=Math.abs(dx);
+  if(dist<260||e.boss){
+   e.dir=dx<0?-1:1;
+   if(dist>24)e.vx+=e.dir*e.spd*5*dt;
+   if(e.type==="ninja"&&e.onGround&&dist<130&&Math.random()<.012){e.vy=-280;e.vx=e.dir*150}
+   if(e.boss&&e.shoot<=0&&dist<420){e.shoot=1.05;projectiles.push({x:e.x+e.w/2,y:e.y+22,vx:e.dir*155,vy:rnd(-30,30),w:10,h:10,life:4,dmg:15,c:"#ff5b35"})}
+  }else{
+   e.vx+=Math.sin(performance.now()/700+e.x)*20*dt;
+   if(Math.abs(e.vx)<8)e.vx=e.dir*20;
+  }
+  e.vx=clamp(e.vx,-e.spd*1.6,e.spd*1.6);e.vy+=G*dt;collideMove(e,dt);e.vx*=Math.pow(.9,dt*60);
+  if(rects(player,e)&&e.atk<=0){e.atk=.8;hurtPlayer(e.dmg,dx<0?-1:1)}
+ }
+}
+function updateProjectiles(dt){
+ for(let i=projectiles.length-1;i>=0;i--){
+  const p=projectiles[i];p.life-=dt;p.vy+=120*dt;p.x+=p.vx*dt;p.y+=p.vy*dt;
+  if(rects(player,p)){hurtPlayer(p.dmg,p.vx>0?1:-1);projectiles.splice(i,1);continue}
+  if(p.life<=0||p.y>260)projectiles.splice(i,1);
+ }
+}
+function updateParticles(dt){
+ for(let i=particles.length-1;i>=0;i--){
+  const p=particles[i];p.life-=dt;p.vy+=360*dt;p.x+=p.vx*dt;p.y+=p.vy*dt;p.vx*=.97;
+  if(p.life<=0)particles.splice(i,1);
+ }
+}
+
+function fill(x,y,w,h,c){ctx.fillStyle=c;ctx.fillRect(ir(x),ir(y),ir(w),ir(h))}
+function draw(){
+ const sx=canvas.width/SW,sy=canvas.height/SH;
+ ctx.setTransform(sx,0,0,sy,0,0);ctx.imageSmoothingEnabled=false;
+ ctx.clearRect(0,0,SW,SH);
+ let ox=0,oy=0;if(shakeT>0){ox=rnd(-shake,shake);oy=rnd(-shake,shake)}
+ drawBg(ox,oy);
+ ctx.save();ctx.translate(ir(-cameraX+ox),ir(oy));
+ drawWorld();
+ for(const e of enemies)drawEnemy(e);
+ for(const p of projectiles){fill(p.x,p.y,p.w,p.h,p.c);fill(p.x+2,p.y+2,3,3,"#ffe68a")}
+ drawPlayer();
+ drawAttacks();
+ for(const p of particles){ctx.globalAlpha=clamp(p.life*2,0,1);fill(p.x,p.y,p.s,p.s,p.c);ctx.globalAlpha=1}
+ ctx.restore();
+ drawHud();
+ if(game.state!=="play")drawOverlay();
+}
+function drawBg(ox,oy){
+ const t=level.theme;
+ const sky=ctx.createLinearGradient(0,0,0,SH);
+ sky.addColorStop(0,t===2?"#302047":t===1?"#6da7bd":"#84c7df");
+ sky.addColorStop(1,t===2?"#7d4a55":t===1?"#d9c690":"#f2c37d");
+ ctx.fillStyle=sky;ctx.fillRect(0,0,SW,SH);
+ const cx=-cameraX;
+ fill(380+cx*.04,35,28,28,t===2?"#c24b43":"#ffef9b");
+ for(let i=-1;i<8;i++){let x=i*110+(cx*.08%110);fill(x,58,70,10,"rgba(255,255,255,.45)");fill(x+18,50,36,9,"rgba(255,255,255,.35)")}
+ ctx.save();ctx.translate(ox,oy);
+ for(let i=-1;i<8;i++){let x=i*130+(cx*.16%130);fill(x,132,150,75,t===2?"#433154":"#527a7d");fill(x+35,102,80,105,t===2?"#382848":"#416c70")}
+ for(let i=-1;i<10;i++){let x=i*85+(cx*.32%85);
+  if(t===0){fill(x,178,70,52,"#8b5b43");fill(x-6,166,82,14,"#49312f");fill(x+10,190,16,40,"#2a1c1c");fill(x+38,188,12,12,"#f3c978")}
+  if(t===1){fill(x+8,136,7,96,"#31583c");fill(x+24,120,8,112,"#386845");fill(x+42,150,7,82,"#31583c");for(let y=138;y<210;y+=20)fill(x+2,y,56,3,"#4f8d5a")}
+  if(t===2){fill(x,116,54,114,"#3a3544");fill(x+8,96,38,22,"#24202c");fill(x+20,72,14,24,"#24202c");fill(x+12,150,10,18,"#ffb15c");fill(x+34,150,10,18,"#ffb15c")}
+ }
+ ctx.restore();
+}
+function drawWorld(){
+ for(const p of platforms()){
+  fill(p.x,p.y,p.w,p.h,level.theme===2?"#36313d":"#5b4634");
+  fill(p.x,p.y,p.w,4,level.theme===1?"#5d8a4b":level.theme===2?"#7b7180":"#6aa84f");
+  for(let x=p.x;x<p.x+p.w;x+=24)fill(x,p.y+6,12,3,"rgba(0,0,0,.18)");
+ }
+ for(let x=0;x<level.len;x+=96){
+  if(level.theme===0){fill(x+20,205,14,25,"#6b3f2e");fill(x+14,196,26,10,"#2d1d20")}
+  if(level.theme===1){fill(x+18,198,6,32,"#31583c");fill(x+10,190,22,5,"#5f9d62")}
+  if(level.theme===2){fill(x+15,196,18,34,"#262430");fill(x+18,188,12,8,"#832b35")}
+ }
+ fill(level.len-48,172,12,58,"#6b2d2d");fill(level.len-58,162,32,12,"#d4b05e");fill(level.len-54,151,24,12,"#3b2634");
+}
+function drawPlayer(){
+ const p=player;if(p.inv>0&&Math.floor(p.inv*16)%2===0)return;
+ fill(p.x+4,p.y+5,9,8,"#f3bd83");fill(p.x+6,p.y,5,5,"#1c1a22");fill(p.x+8,p.y-3,7,4,"#1c1a22");
+ fill(p.x+2,p.y+13,13,12,"#245f9d");fill(p.x+1,p.y+15,5,8,"#1f4f86");fill(p.x+10,p.y+15,6,8,"#1f4f86");
+ fill(p.x+3,p.y+25,5,8,"#2a2430");fill(p.x+10,p.y+25,5,8,"#2a2430");
+ fill(p.x+(p.dir>0?13:-8),p.y+11,10,3,"#b68244");fill(p.x+(p.dir>0?21:-10),p.y+9,3,6,"#d8d0bd");
+ fill(p.x+5,p.y+12,8,3,"#f0d26a");
+}
+function drawEnemy(e){
+ if(e.dead)return;
+ fill(e.x,e.y+7,e.w,e.h-7,e.color);
+ fill(e.x+3,e.y+2,e.w-6,8,e.type==="oni"||e.boss?"#b24a55":"#d0a070");
+ if(e.type==="ninja"){fill(e.x+3,e.y+7,e.w-6,3,"#111");fill(e.x+5,e.y+8,3,2,e.accent);fill(e.x+e.w-8,e.y+8,3,2,e.accent)}
+ if(e.type==="samurai"){fill(e.x+2,e.y-2,e.w-4,5,"#4d2b22");fill(e.x+e.w/2-1,e.y-7,3,6,"#222");fill(e.x+e.w*(e.dir>0?1:-.25),e.y+12,15,2,"#d8d8d8")}
+ if(e.type==="oni"||e.boss){fill(e.x+4,e.y-3,4,7,"#f6e28a");fill(e.x+e.w-8,e.y-3,4,7,"#f6e28a");fill(e.x+6,e.y+9,4,3,"#ffef80");fill(e.x+e.w-10,e.y+9,4,3,"#ffef80")}
+ fill(e.x,e.y-7,e.w,3,"#391b1b");fill(e.x,e.y-7,e.w*(e.hp/e.maxhp),3,e.boss?"#ff3333":"#7dff6c");
+}
+function drawAttacks(){
+ ctx.lineWidth=2;
+ for(const a of attacks){
+  if(a.type==="pipe"){fill(a.x,a.y,a.w,a.h,"rgba(255,240,180,.28)");fill(a.x+(a.dir>0?a.w-4:0),a.y+6,6,4,"#f7e6a5")}
+  else{
+   ctx.strokeStyle="#d9d9e8";ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(a.ex,a.ey);ctx.stroke();
+   fill(a.ex-5,a.ey-5,10,10,"#cfd3dc");fill(a.ex-2,a.ey-8,4,14,"#8b8f99");
+  }
+ }
+}
+function drawHud(){
+ fill(10,10,108,11,"#2b1720");fill(12,12,104*(player.hp/player.maxhp),7,"#e84855");fill(12,12,104,2,"#ff9a9a");
+ ctx.fillStyle="#fff4c8";ctx.font="9px monospace";ctx.fillText("GOEMON",12,8);
+ ctx.fillStyle="#fff";ctx.font="12px monospace";ctx.fillText("Score "+game.score,132,18);ctx.fillText("Lives "+Math.max(0,game.lives),230,18);ctx.fillText("Lv "+(game.level+1)+" "+level.name,300,18);
+ const boss=enemies.find(e=>e.boss&&!e.dead);
+ if(boss){fill(110,33,260,10,"#29131a");fill(112,35,256*(boss.hp/boss.maxhp),6,"#ff3045");ctx.fillStyle="#ffd0d0";ctx.fillText("ONI SHOGUN",205,31)}
+ if(game.msg&&game.state==="play"){ctx.globalAlpha=.85;ctx.fillStyle="#fff2b0";ctx.font="16px monospace";ctx.textAlign="center";ctx.fillText(game.msg,SW/2,50);ctx.textAlign="left";ctx.globalAlpha=1}
+}
+function drawOverlay(){
+ ctx.fillStyle="rgba(0,0,0,.62)";ctx.fillRect(0,0,SW,SH);
+ ctx.textAlign="center";ctx.fillStyle="#ffe6a3";ctx.font="24px monospace";ctx.fillText(game.state==="win"?"勝利 VICTORY":"GAME OVER",SW/2,104);
+ ctx.font="14px monospace";ctx.fillStyle="#fff";ctx.fillText(game.msg,SW/2,132);ctx.fillText("Score: "+game.score,SW/2,154);ctx.fillText("Press Enter/R or tap to restart",SW/2,184);ctx.textAlign="left";
+}
+canvas.addEventListener("pointerdown",()=>{if(game.state!=="play")restart()});
+
+function loop(t){
+ const dt=Math.min(.033,((t-lastTime)||16)/1000);lastTime=t;
+ update(dt);draw();requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
